@@ -1,0 +1,4 @@
+## Stream-lit Version
+streamlit>=1.30.0
+--
+
