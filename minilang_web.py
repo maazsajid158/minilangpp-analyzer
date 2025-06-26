@@ -3,13 +3,11 @@ import streamlit as st
 
 # ---------------- Tokenizer ----------------
 KEYWORDS = {"int", "if", "else", "return"}
-SYMBOLS = {"{", "}", "(", ")", ";", ">", "=", ","}
-
 token_specification = [
     ("NUMBER",    r'\d+'),
     ("ID",        r'[A-Za-z_]\w*'),
-    ("SYMBOL",    r'[{}();>=,]'),
-    ("OP",        r'[+\-*/%]'),  # Added modulus %
+    ("OP",        r'(==|!=|<=|>=|[+\-*/%<>])'),
+    ("SYMBOL",    r'[{}();=,]'),
     ("SKIP",      r'[ \t]+'),
     ("NEWLINE",   r'\n'),
     ("MISMATCH",  r'.')
@@ -25,14 +23,9 @@ def tokenize(code):
         if kind == "NUMBER":
             tokens.append(("NUMBER", value))
         elif kind == "ID":
-            if value in KEYWORDS:
-                tokens.append(("KEYWORD", value))
-            else:
-                tokens.append(("ID", value))
+            tokens.append(("KEYWORD", value) if value in KEYWORDS else ("ID", value))
         elif kind in ["SYMBOL", "OP"]:
             tokens.append((kind, value))
-        elif kind in ["SKIP", "NEWLINE"]:
-            continue
         elif kind == "MISMATCH":
             raise RuntimeError(f"Unexpected character {value}")
     return tokens
@@ -74,8 +67,6 @@ def parse_tokens(tokens):
         while i < len(tokens) and tokens[i][1] != ")":
             if tokens[i][1] == ",":
                 i += 1
-            if i < len(tokens) and tokens[i][1] == ")":
-                break
             param_type = expect("KEYWORD", "int")
             param_name = expect("ID")
             params.append((param_type, param_name))
@@ -84,8 +75,7 @@ def parse_tokens(tokens):
         expect("SYMBOL", "{")
         body = []
         while i < len(tokens) and tokens[i][1] != "}":
-            stmt = parse_statement()
-            body.append(stmt)
+            body.append(parse_statement())
         expect("SYMBOL", "}")
         return ASTNode("Function", func_name, [ASTNode("Params", params), ASTNode("Body", None, body)])
 
@@ -150,34 +140,35 @@ def parse_tokens(tokens):
             elif tokens[i][0] == "ID":
                 val = tokens[i][1]
                 i += 1
-                if i < len(tokens) and tokens[i][1] == "(":
-                    i += 1
-                    args = []
-                    while i < len(tokens) and tokens[i][1] != ")":
-                        if tokens[i][1] == ",":
-                            i += 1
-                        args.append(parse_expression())
-                    expect("SYMBOL", ")")
-                    return ASTNode("FuncCall", val, args)
                 return ASTNode("Var", val)
             else:
                 raise SyntaxError(f"Invalid expression near {tokens[i]}")
 
-        def parse_binary_expression():
+        def get_precedence(op):
+            return {
+                '==': 1, '!=': 1,
+                '>': 2, '<': 2, '>=': 2, '<=': 2,
+                '+': 3, '-': 3,
+                '*': 4, '/': 4, '%': 4
+            }.get(op, 0)
+
+        def parse_with_precedence(min_prec):
             nonlocal i
             left = parse_primary()
             while i < len(tokens) and tokens[i][0] == "OP":
                 op = tokens[i][1]
+                prec = get_precedence(op)
+                if prec < min_prec:
+                    break
                 i += 1
-                right = parse_primary()
+                right = parse_with_precedence(prec + 1)
                 left = ASTNode("BinOp", op, [left, right])
             return left
 
-        return parse_binary_expression()
+        return parse_with_precedence(1)
 
     while i < len(tokens):
         ast.append(parse_function())
-
     return ast
 
 # ---------------- Semantic Checks ----------------
@@ -194,10 +185,9 @@ def check_semantics(ast):
 
     for tree in ast:
         visit(tree)
-
     return errors
 
-# ---------------- Intermediate Code (TAC) ----------------
+# ---------------- TAC Generator ----------------
 def generate_TAC(ast):
     code = []
     temp_count = 0
@@ -219,11 +209,6 @@ def generate_TAC(ast):
         elif node.type == "Declare":
             rhs = visit(node.children[0])
             code.append(f"{node.value} = {rhs}")
-        elif node.type == "FuncCall":
-            args = [visit(arg) for arg in node.children]
-            result = new_temp()
-            code.append(f"{result} = call {node.value}({', '.join(args)})")
-            return result
         elif node.type == "Return":
             val = visit(node.children[0])
             code.append(f"return {val}")
@@ -235,14 +220,26 @@ def generate_TAC(ast):
             return result
         elif node.type == "If":
             cond = visit(node.children[0])
-            code.append(f"if {cond} goto THEN")
+            then_label = f"L_then_{len(code)}"
+            else_label = f"L_else_{len(code)}"
+            end_label = f"L_end_{len(code)}"
+
+            code.append(f"if {cond} goto {then_label}")
+            code.append(f"goto {else_label}")
+            code.append(f"{then_label}:")
+            for stmt in node.children[1].children:
+                visit(stmt)
+            code.append(f"goto {end_label}")
+            code.append(f"{else_label}:")
+            for stmt in node.children[2].children:
+                visit(stmt)
+            code.append(f"{end_label}:")
         for child in node.children:
             if isinstance(child, ASTNode):
                 visit(child)
 
     for tree in ast:
         visit(tree)
-
     return code
 
 # ---------------- Streamlit Web App ----------------
